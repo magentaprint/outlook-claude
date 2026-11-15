@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>שלח לקלוד</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#ffffff; --fg:#1f1f1f; --muted:#666; --line:#d9d9d9; --accent:#c2185b; --ok:#2e7d32; --warn:#b26a00; --box:#f7f7f7; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#f0f0f0; --muted:#aaa; --line:#444; --box:#2a2a2a; --accent:#f06292; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:14px; font-family:"Segoe UI", Arial, sans-serif; background:var(--bg); color:var(--fg); font-size:14px; }
+  h1 { font-size:16px; margin:0 0 10px; color:var(--accent); }
+  .subj { font-size:12px; color:var(--muted); margin-bottom:10px; word-break:break-word; }
+  textarea { width:100%; min-height:110px; padding:8px; font:inherit; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); resize:vertical; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  .chip { border:1px solid var(--line); background:var(--box); color:var(--fg); border-radius:14px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  button.send { width:100%; margin-top:6px; padding:10px; font:inherit; font-weight:600; color:#fff; background:var(--accent); border:0; border-radius:6px; cursor:pointer; }
+  button.send:disabled { opacity:.5; cursor:default; }
+  .status { margin-top:12px; padding:10px; border-radius:6px; background:var(--box); white-space:pre-wrap; line-height:1.45; display:none; }
+  .status.ok { border-right:4px solid var(--ok); }
+  .status.wait { border-right:4px solid var(--warn); }
+  .hint { margin-top:12px; font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <h1>שלח לקלוד</h1>
+  <div class="subj" id="subj">טוען…</div>
+  <textarea id="txt" placeholder="מה לעשות עם המייל הזה? למשל: תוריד לביצוע / תכין תשובה שזה מוכן מחר / תתמחר"></textarea>
+  <div class="chips">
+    <span class="chip">תוריד לביצוע</span>
+    <span class="chip">תתמחר ותכין הצעת מחיר</span>
+    <span class="chip">תכין טיוטת תשובה</span>
+    <span class="chip">תבדוק את הקבצים</span>
+  </div>
+  <button class="send" id="send">שלח לקלוד</button>
+  <div class="status" id="status"></div>
+  <div class="hint">קלוד בודק בקשות כל כמה דקות. התשובה תופיע כאן כשתפתח שוב את המייל, והמייל יסומן "קלוד – טופל".</div>
+<script>
+const CATS = [
+  { name: 'קלוד – לטיפול', color: 'Preset1' },
+  { name: 'קלוד – בטיפול', color: 'Preset3' },
+  { name: 'קלוד – טופל',   color: 'Preset4' }
+];
+const $ = id => document.getElementById(id);
+let props = null;
+
+function setStatus(text, cls) {
+  const s = $('status');
+  s.textContent = text; s.className = 'status ' + (cls || ''); s.style.display = text ? 'block' : 'none';
+}
+
+function load() {
+  const item = Office.context.mailbox.item;
+  if (!item) { $('subj').textContent = 'בחר מייל'; $('send').disabled = true; return; }
+  $('send').disabled = false;
+  $('subj').textContent = item.subject || '(ללא נושא)';
+  $('txt').value = ''; setStatus('');
+  item.loadCustomPropertiesAsync(r => {
+    if (r.status !== Office.AsyncResultStatus.Succeeded) return;
+    props = r.value;
+    const req = props.get('req'), ans = props.get('answer');
+    if (ans) setStatus('✔ קלוד:\n' + ans + (req ? '\n\n(הבקשה: ' + req + ')' : ''), 'ok');
+    else if (req) setStatus('⏳ ממתין לקלוד:\n' + req, 'wait');
+  });
+}
+
+function ensureMasterCategories() {
+  return new Promise(resolve => {
+    const mc = Office.context.mailbox.masterCategories;
+    if (!mc) return resolve();
+    mc.getAsync(r => {
+      const have = (r.value || []).map(c => c.displayName);
+      const add = CATS.filter(c => have.indexOf(c.name) < 0)
+                      .map(c => ({ displayName: c.name, color: Office.MailboxEnums.CategoryColor[c.color] }));
+      if (!add.length) return resolve();
+      mc.addAsync(add, () => resolve());
+    });
+  });
+}
+
+async function send() {
+  const text = $('txt').value.trim();
+  if (!text) { $('txt').focus(); return; }
+  const item = Office.context.mailbox.item;
+  $('send').disabled = true; setStatus('שולח…', 'wait');
+  const fail = msg => { setStatus('שגיאה: ' + msg, ''); $('send').disabled = false; };
+  if (!props) return fail('לא נטען המייל, נסה שוב');
+  props.set('req', text);
+  props.set('reqAt', new Date().toISOString());
+  props.remove('answer');
+  props.saveAsync(async r => {
+    if (r.status !== Office.AsyncResultStatus.Succeeded) return fail(r.error && r.error.message);
+    await ensureMasterCategories();
+    const done = () => { setStatus('⏳ נשלח לקלוד:\n' + text, 'wait'); $('txt').value = ''; $('send').disabled = false; };
+    item.categories.removeAsync(['קלוד – טופל', 'קלוד – בטיפול'], () => {
+      item.categories.addAsync(['קלוד – לטיפול'], r2 => {
+        if (r2.status !== Office.AsyncResultStatus.Succeeded) return fail(r2.error && r2.error.message);
+        done();
+      });
+    });
+  });
+}
+
+Office.onReady(() => {
+  document.querySelectorAll('.chip').forEach(c => c.onclick = () => {
+    const t = $('txt'); t.value = (t.value ? t.value + ' ' : '') + c.textContent; t.focus();
+  });
+  $('send').onclick = send;
+  load();
+  try { Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, load); } catch (e) {}
+});
+</script>
+</body>
+</html>
